@@ -15,8 +15,7 @@ This repository is organized to be **easy to run** with the provided DrugComb / 
 - [Quick Start](#quick-start)
 - [Data Format](#data-format)
 - [Optional Feature Extraction](#optional-feature-extraction)
-- [Training](#training)
-- [Citation](#citation)
+- [Training](#training) <!-- - [Citation](#citation) -->
 - [License](#license)
 
 ---
@@ -161,7 +160,7 @@ data/LLM/drug_desc_embedding.csv
 data/LLM/llm_smiles_embeddings.npy
 ```
 
-⚠️ You must provide your own **API key** and **base URL** inside `api.ipynb`.
+You must provide your own **API key** and **base URL** inside `api.ipynb`.
 
 If you use the provided cached embeddings, you can skip this step.
 
@@ -211,7 +210,7 @@ python main.py   --tag dann_run   --use_dann   --adv_start_epoch 5   --adv_warmu
 - `target_train_unlabeled.csv` is typically used only when `--use_dann` is enabled.
 - More arguments are available in `main.py`. Adjust them to your needs.
 
----
+<!-- ---
 
 ## Citation
 
@@ -224,7 +223,7 @@ If you use this project in academic work, please cite:
   journal = {Bioinformatics},
   year    = {2026}
 }
-```
+``` -->
 
 ---
 
