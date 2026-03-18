@@ -1,232 +1,188 @@
 # DanSyn
 
-DanSyn is a **domain-adaptive drug synergy prediction** project that supports both:
+DanSyn predicts drug synergy with `ESPF`, cell latent features, cross attention,
+optional `DANN`, and `gpt_3_5_turbo` drug features.
 
-- **Supervised training** (standard setting)
-- **Domain-Adversarial training (DANN)** for better generalization under **domain shift / cold-start** (e.g., new drugs)
+The main entry is `main.py`.
 
-This repository is organized to be **easy to run** with the provided DrugComb / DrugCombDB splits, and also easy to extend to your own datasets.
+## 1. Run The Main Experiments
 
----
+Built-in datasets:
 
-## Table of Contents
+- `drugcombdb_126_67`
+- `drugcomb_288_146`
 
-- [Repository Structure](#repository-structure)
-- [Quick Start](#quick-start)
-- [Data Format](#data-format)
-- [Optional Feature Extraction](#optional-feature-extraction)
-- [Training](#training) <!-- - [Citation](#citation) -->
-- [License](#license)
+Run DrugCombDB:
 
----
-
-## Repository Structure
-
-```text
-DanSyn/
-├── data/
-│   ├── dataset/                  # train/val/test splits (source/target)
-│   │   ├── source_train_labeled.csv
-│   │   ├── source_val_labeled.csv
-│   │   ├── source_test_labeled.csv
-│   │   ├── target_train_unlabeled.csv
-│   │   └── target_test_labeled.csv
-│   ├── ESPF/                     # ESPF tokenization + cached vectors
-│   │   ├── info/
-│   │   ├── dict.ipynb
-│   │   └── ESPF_smiles_vectors.npy
-│   ├── LLM/                      # LLM embedding scripts + cached vectors
-│   │   ├── api.ipynb
-│   │   ├── drug_desc_embedding.csv
-│   │   └── llm_smiles_embeddings.npy
-│   ├── cell_line_latent_values.csv
-│   ├── cell_line_latent_values.npy
-│   ├── divide.ipynb              # dataset switch / split helper
-│   ├── drugcomb_288_146.csv
-│   ├── drugcombDB_126_67.csv
-│   └── unique_drugs_with_smiles.csv
-├── main.py
-├── model.py
-├── utils.py
-├── env.txt
-├── LICENSE
-└── README.md
+```bash
+python main.py --tag db_supervised --dataset_split drugcombdb_126_67
+python main.py --tag db_dann --dataset_split drugcombdb_126_67 --use_dann
 ```
 
----
+Run DrugComb:
 
-## Quick Start
-
-### 1) Environment
-
-You need to install:
-
-- Python >= 3.9 (recommended 3.10)
-- PyTorch (+ CUDA if available)
-- PyTorch Geometric
-- numpy / pandas / scikit-learn / tqdm / etc.
-
-> For reference, check `env.txt`.
-
----
-
-### 2) Use provided dataset splits
-
-The repo already provides the ready-to-run split files here:
-
-```text
-data/dataset/
-  source_train_labeled.csv
-  source_val_labeled.csv
-  source_test_labeled.csv
-  target_train_unlabeled.csv
-  target_test_labeled.csv
+```bash
+python main.py --tag dc_supervised --dataset_split drugcomb_288_146
+python main.py --tag dc_dann --dataset_split drugcomb_288_146 --use_dann
 ```
 
-Then you can run training directly (see [Training](#training)).
+`--use_dann` enables the domain generalization setting.
 
----
+Run all four preset jobs:
 
-## Data Format
+```bash
+python scripts/run_main_scenarios.py
+```
 
-DanSyn expects dataset CSVs with consistent column names.
+Preview the commands only:
 
-Typical columns include:
+```bash
+python scripts/run_main_scenarios.py --dry_run
+```
+
+## 2. Environment
+
+```bash
+conda create --name dansyn --file env.txt
+conda activate dansyn
+```
+
+## 3. Use Your Own Data
+
+If you already have a custom split folder, train with:
+
+```bash
+python main.py \
+  --tag my_dataset_run \
+  --dataset_split_dir data/datasets/my_dataset_split \
+  --cell_latent_npy data/cell_line_latent_values.npy \
+  --espf_npy data/ESPF/ESPF_smiles_vectors.npy \
+  --llm_npy data/LLM/gpt_3_5_turbo/llm_smiles_embeddings.npy
+```
+
+If your files are stored elsewhere, add `--data_root your_data_dir`.
+
+### 3.1 Raw CSV Format
+
+Each row should represent one drug pair on one cell line.
+
+Required columns:
 
 - `cell_line_id`
 - `drug_row_smiles`
 - `drug_col_smiles`
 - `synergy_loewe`
 
-> If you use your own dataset, **make sure your column names match** the provided CSV templates in `data/dataset/`.
+Recommended columns:
 
----
+- `cell_line_name`
+- `drug_row`
+- `drug_col`
 
-## Optional Feature Extraction
+Example:
 
-If you run with the provided DrugComb / DrugCombDB setup, you can usually **skip** this section.
-
-If you switch to a **custom dataset**, you should regenerate:
-
-- unique drug table
-- ESPF vectors (optional)
-- LLM embeddings (optional)
-- cell features (if not already prepared)
-
----
-
-### 1) Unique drug table
-
-From your dataset, extract unique drug entries into:
-
-```text
-data/unique_drugs_with_smiles.csv
+```csv
+cell_line_id,cell_line_name,drug_row,drug_col,drug_row_smiles,drug_col_smiles,synergy_loewe
+A375,A375,Erlotinib,Trametinib,C#Cc1cccc(Nc2ncnc3cc(OCCOC)c(OCCOC)cc23)c1,CNc1nc(Nc2ccc(I)cc2F)c2ncc(C(=O)N3CCN(C)CC3)cc2n1,12.4
 ```
 
-This file is used to cache and reuse drug features.
+### 3.2 Build A Custom Split
 
----
-
-### 2) ESPF structural features
-
-ESPF encodes SMILES into explainable structural token sequences.
-
-Notebook:
-```text
-data/ESPF/dict.ipynb
+```bash
+python tools/datasets/build_dataset_splits.py \
+  --input_csv data/my_dataset.csv \
+  --output_dir data/datasets/my_dataset_split \
+  --custom_name my_dataset
 ```
 
-Output cache:
-```text
-data/ESPF/ESPF_smiles_vectors.npy
+The split folder must contain:
+
+- `source_train_labeled.csv`
+- `source_val_labeled.csv`
+- `source_test_labeled.csv`
+- `target_train_unlabeled.csv`
+- `target_test_labeled.csv`
+
+## 4. Build Features For New Data
+
+### 4.1 ESPF
+
+```bash
+python tools/espf/build_espf_features.py \
+  --input_csvs data/my_dataset.csv \
+  --output_npy data/ESPF/ESPF_smiles_vectors.npy
 ```
 
-If you use the provided dataset + cached features, you can skip this step.
+Multiple CSV files are also supported:
 
----
-
-### 3) LLM semantic embeddings
-
-This step uses LLM-generated drug descriptions (or drug semantic embeddings) and caches them.
-
-Notebook:
-```text
-data/LLM/api.ipynb
+```bash
+python tools/espf/build_espf_features.py \
+  --input_csvs train.csv val.csv test.csv \
+  --output_npy data/ESPF/ESPF_smiles_vectors.npy
 ```
 
-Outputs:
-```text
-data/LLM/drug_desc_embedding.csv
-data/LLM/llm_smiles_embeddings.npy
+### 4.2 LLM Features
+
+Preview the resolved drug table without calling any API:
+
+```bash
+python tools/llm/build_llm_features.py \
+  --input_csvs data/my_dataset.csv \
+  --dry_run
 ```
 
-You must provide your own **API key** and **base URL** inside `api.ipynb`.
+Generate LLM features with your own API key:
 
-If you use the provided cached embeddings, you can skip this step.
+```bash
+python tools/llm/build_llm_features.py \
+  --input_csvs data/my_dataset.csv \
+  --api_key YOUR_API_KEY
+```
 
----
+If needed, you can also pass a custom `--base_url`.
 
-### 4) Cell features
+### 4.3 Cell Features
 
-The repo contains cached cell features:
+This project directly uses `cell_line_latent_values.npy`.
+
+If you want to replace it, prepare your own file with:
+
+- key: `cell_line_id`
+- value: 1D latent vector
+- one consistent latent dimension for all cells
+
+## 5. Outputs
+
+Each run writes a timestamped folder under `results/` containing:
+
+- `run_config.json`
+- `data_stats.json`
+- `epoch_metrics.csv`
+- `train_summary.json`
+- `best_model.pth`
+- `last_model.pth`
+- `source_test_predictions.csv`
+- `target_test_predictions.csv`
+- `test_metrics.json`
+- `test_metrics.csv`
+
+`test_metrics.csv` includes both `source_test` and `target_test`.
+
+## 6. Data Layout
+
+By default, `main.py` reads from `data/`.
+
+Default feature files:
 
 ```text
-data/cell_line_latent_values.csv
 data/cell_line_latent_values.npy
+data/ESPF/ESPF_smiles_vectors.npy
+data/LLM/gpt_3_5_turbo/llm_smiles_embeddings.npy
 ```
 
----
+Preset split directories:
 
-### 5) Switch dataset / re-split
-
-Notebook:
 ```text
-data/divide.ipynb
+data/datasets/drugcombdb_126_67/
+data/datasets/drugcomb_288_146_sf03/
 ```
-
-Use it to:
-- switch between DrugComb / DrugCombDB
-- regenerate your source/target splits for a new dataset
-
----
-
-## Training
-
-DanSyn supports two common modes.
-
-### (A) Supervised only
-
-```bash
-python main.py   --tag baseline_sup   --epochs 150   --batch_size 32   --lr 1e-4   --weight_decay 0   --early_stop_patience 15   --eval_every 1
-```
-
-### (B) DANN enabled (Domain Adaptation)
-
-```bash
-python main.py   --tag dann_run   --use_dann   --adv_start_epoch 5   --adv_warmup_epochs 5   --adv_weight_max 1.0   --lambda_int 0.3   --epochs 10   --batch_size 32   --lr 1e-4   --weight_decay 0   --early_stop_patience 5   --eval_every 1
-```
-
-**Notes**
-- `target_train_unlabeled.csv` is typically used only when `--use_dann` is enabled.
-- More arguments are available in `main.py`. Adjust them to your needs.
-
-<!-- ---
-
-## Citation
-
-If you use this project in academic work, please cite:
-
-```bibtex
-@article{zhang2026dansyn,
-  title   = {DanSyn: A Domain-Adaptive Framework with Hybrid Structural-Functional Representations for Robust Drug Synergy Prediction},
-  author  = {Zhang, Ruoyin and Tao, Siyu and Feng, Yimiao and Zheng, Jie},
-  journal = {Bioinformatics},
-  year    = {2026}
-}
-``` -->
-
----
-
-## License
-
-See `LICENSE`.

@@ -1,0 +1,41 @@
+{
+  "dataset_name": "drugcomb_288_146",
+  "input_csv": "data\\drugcomb_288_146.csv",
+  "output_dir": "data\\datasets\\drugcomb_288_146_sf03",
+  "random_state": 42,
+  "sample_frac": 0.3,
+  "target_drug_ratio": 0.1,
+  "target_drug_selection": "uniform",
+  "target_drug_note": "uniform: evenly sampled 28/288 drugs by rank",
+  "source_val_ratio": 0.2,
+  "source_test_ratio": 0.2,
+  "target_unlabeled_ratio": 0.9,
+  "min_samples_threshold": 3,
+  "original_rows": 382022,
+  "used_rows": 114607,
+  "n_total_cells": 146,
+  "n_total_drugs": 288,
+  "n_target_drugs": 28,
+  "split_stats": {
+    "source_train": {
+      "rows": 55458,
+      "cells": 145
+    },
+    "source_val": {
+      "rows": 18482,
+      "cells": 144
+    },
+    "source_test": {
+      "rows": 18482,
+      "cells": 144
+    },
+    "target_train_unlabeled": {
+      "rows": 19942,
+      "cells": 144
+    },
+    "target_test_labeled": {
+      "rows": 2243,
+      "cells": 142
+    }
+  }
+}

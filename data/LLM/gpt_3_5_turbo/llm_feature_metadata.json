@@ -1,0 +1,19 @@
+{
+  "variant_key": "gpt_3_5_turbo",
+  "display_name": "gpt-3.5-turbo",
+  "text_model": "gpt-3.5-turbo",
+  "embedding_model": "text-embedding-3-small",
+  "lookup_csv": "data/unique_drugs_with_smiles.csv",
+  "reference_csv": "",
+  "csv_path": "data/LLM/gpt_3_5_turbo/drug_desc_embedding.csv",
+  "npy_path": "data/LLM/gpt_3_5_turbo/llm_smiles_embeddings.npy",
+  "num_unique_drugs": 274,
+  "num_vectors_saved": 274,
+  "embedding_dim": 1536,
+  "request_sleep_sec": 1.0,
+  "max_retries": 5,
+  "base_url": "",
+  "prompt_source": "tools/llm/llm_profile_utils.py",
+  "generated_at": "2026-03-15T08:46:22.679387",
+  "complete": true
+}

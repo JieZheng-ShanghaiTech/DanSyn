@@ -1,18 +1,17 @@
+from __future__ import annotations
+
+from math import sqrt
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from torch.autograd import Function
 from tqdm import tqdm
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from math import sqrt
-import pandas as pd
 
-# =========================
-#  Basic Blocks & DANN Utils
-# =========================
 
 class MLP(nn.Module):
-    def __init__(self, input_size, hidden_size=512):
+    def __init__(self, input_size: int, hidden_size: int = 256):
         super().__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, 128)
@@ -21,34 +20,35 @@ class MLP(nn.Module):
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(0.2)
 
-    def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.relu(self.fc2(x))
-        x = self.dropout(x)
-        x = self.relu(self.fc3(x))
-        x = self.dropout(x)
-        x = self.fc4(x)
-        return x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.dropout(self.relu(self.fc1(x)))
+        x = self.dropout(self.relu(self.fc2(x)))
+        x = self.dropout(self.relu(self.fc3(x)))
+        return self.fc4(x)
+
 
 class GradientReversalFunction(Function):
     @staticmethod
-    def forward(ctx, x, lambda_):
+    def forward(ctx, x: torch.Tensor, lambda_: float) -> torch.Tensor:
         ctx.lambda_ = lambda_
         return x.view_as(x)
+
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
         return -ctx.lambda_ * grad_output, None
 
+
 class GradientReversalLayer(nn.Module):
-    def __init__(self, lambda_=1.0):
+    def __init__(self, lambda_: float = 1.0):
         super().__init__()
         self.lambda_ = lambda_
-    def forward(self, x):
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return GradientReversalFunction.apply(x, self.lambda_)
 
+
 class DANNModule(nn.Module):
-    def __init__(self, feature_dim=512, num_domains=2, lambda_adv=1.0):
+    def __init__(self, feature_dim: int = 512, num_domains: int = 2, lambda_adv: float = 1.0):
         super().__init__()
         self.grl = GradientReversalLayer(lambda_=lambda_adv)
         self.domain_discriminator = nn.Sequential(
@@ -58,89 +58,69 @@ class DANNModule(nn.Module):
             nn.Linear(1024, 1024),
             nn.ReLU(),
             nn.Dropout(0.5),
-            nn.Linear(1024, num_domains)
+            nn.Linear(1024, num_domains),
         )
-    def forward(self, f, domain_label):
-        f_rev = self.grl(f)
-        domain_logits = self.domain_discriminator(f_rev)
-        adv_loss = F.cross_entropy(domain_logits, domain_label)
-        return adv_loss, domain_logits
 
+    def forward(self, features: torch.Tensor, domain_labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        reversed_features = self.grl(features)
+        logits = self.domain_discriminator(reversed_features)
+        loss = F.cross_entropy(logits, domain_labels)
+        return loss, logits
 
-# =========================
-#  Encoders
-# =========================
 
 class DrugEncoder(nn.Module):
-    """
-    ESPF Transformer Encoder.
-    pooling="nopool": return [B, L, D]
-    """
     def __init__(
         self,
         vocab_size: int,
         hidden_size: int,
         max_seq_length: int,
         num_layers: int = 2,
-        num_heads: int = 4,
+        num_heads: int = 8,
         dropout_rate: float = 0.1,
         pad_token_id: int = 0,
     ):
         super().__init__()
         self.max_seq_length = max_seq_length
-        self.pad_token_id = pad_token_id
-
         self.word_embedding = nn.Embedding(vocab_size, hidden_size, padding_idx=pad_token_id)
         self.position_embedding = nn.Embedding(max_seq_length, hidden_size)
         self.layer_norm = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout_rate)
-
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_size,
             nhead=num_heads,
             dim_feedforward=hidden_size * 4,
             dropout=dropout_rate,
             activation="gelu",
-            batch_first=True
+            batch_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-    def forward(self, input_ids, attention_mask=None):
-        B, L = input_ids.size()
-        # Truncate
-        if L > self.max_seq_length:
-            input_ids = input_ids[:, :self.max_seq_length]
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+        batch_size, seq_len = input_ids.size()
+        if seq_len > self.max_seq_length:
+            input_ids = input_ids[:, : self.max_seq_length]
             if attention_mask is not None:
-                attention_mask = attention_mask[:, :self.max_seq_length]
-            L = self.max_seq_length
+                attention_mask = attention_mask[:, : self.max_seq_length]
+            seq_len = self.max_seq_length
 
         word_embeds = self.word_embedding(input_ids)
-        position_ids = torch.arange(L, device=input_ids.device).unsqueeze(0).expand(B, L)
-        pos_embeds = self.position_embedding(position_ids)
+        position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, seq_len)
+        position_embeds = self.position_embedding(position_ids)
 
-        x = self.layer_norm(word_embeds + pos_embeds)
-        x = self.dropout(x)
-
-        if attention_mask is not None:
-            src_key_padding_mask = ~attention_mask.bool() # True=mask out
-        else:
-            src_key_padding_mask = None
-
-        encoded = self.transformer(x, src_key_padding_mask=src_key_padding_mask) # [B, L, D]
-        return encoded
+        encoded = self.layer_norm(word_embeds + position_embeds)
+        encoded = self.dropout(encoded)
+        padding_mask = ~attention_mask.bool() if attention_mask is not None else None
+        return self.transformer(encoded, src_key_padding_mask=padding_mask)
 
 
 class CellResidualAdapter(nn.Module):
-    """
-    MLP + Residual Block
-    """
-    def __init__(self, input_dim=200, hidden_dim=128, dropout=0.1):
+    def __init__(self, input_dim: int, hidden_dim: int = 128, dropout: float = 0.1):
         super().__init__()
         self.proj_in = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout),
         )
         self.res_block = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -148,268 +128,230 @@ class CellResidualAdapter(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim)
+            nn.BatchNorm1d(hidden_dim),
         )
         self.final_relu = nn.ReLU()
 
-    def forward(self, omics_latent):
+    def forward(self, omics_latent: torch.Tensor) -> torch.Tensor:
         x = self.proj_in(omics_latent)
-        identity = x
-        out = self.res_block(x)
-        out += identity
-        out = self.final_relu(out)
-        return out # [B, 128]
+        out = self.res_block(x) + x
+        return self.final_relu(out)
 
 
-# =========================
-#  Fusion: Gated Pooling (The Core Modification)
-# =========================
-
-class GatedPoolingFusion(nn.Module):
-    """
-    Gated Pooling
-    """
-    def __init__(self, drug_dim, cell_dim, out_dim):
+class CrossAttentionFusion(nn.Module):
+    def __init__(self, drug_dim: int, cell_dim: int, out_dim: int, num_heads: int = 8, dropout: float = 0.1):
         super().__init__()
-        # Attention Score
-        self.attn_net = nn.Sequential(
-            nn.Linear(drug_dim + cell_dim, 128),
-            nn.Tanh(),
-            nn.Linear(128, 1)
+        self.query_proj = nn.Linear(cell_dim, drug_dim)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=drug_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
         )
-        
-        # Drug_pooled + Cell
+        self.attn_norm = nn.LayerNorm(drug_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(drug_dim, drug_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(drug_dim * 2, drug_dim),
+        )
+        self.ffn_norm = nn.LayerNorm(drug_dim)
         self.post_proj = nn.Sequential(
             nn.Linear(drug_dim + cell_dim, out_dim),
             nn.ReLU(),
-            nn.LayerNorm(out_dim)
+            nn.LayerNorm(out_dim),
         )
 
-    def forward(self, drug_seq, drug_mask, cell_vec):
-        """
-        drug_seq: [B, L, D_drug]
-        drug_mask: [B, L] (1=valid, 0=pad)
-        cell_vec: [B, D_cell]
-        """
-        B, L, D = drug_seq.size()
-        
-        # 1. Expand Cell Vector to match sequence length
-        # [B, D_cell] -> [B, L, D_cell]
-        cell_expanded = cell_vec.unsqueeze(1).expand(-1, L, -1)
-        
-        # 2. Concat at token level: [B, L, D_drug + D_cell]
-        combined_seq = torch.cat([drug_seq, cell_expanded], dim=-1)
-        
-        # 3. Calculate Attention Scores: [B, L, 1]
-        raw_scores = self.attn_net(combined_seq)
-        
-        # 4. Masking (Critical for ESPF padding!)
+    def forward(self, drug_seq: torch.Tensor, drug_mask: torch.Tensor, cell_vec: torch.Tensor) -> torch.Tensor:
+        query = self.query_proj(cell_vec).unsqueeze(1)
+
+        key_padding_mask = None
+        all_pad = None
         if drug_mask is not None:
-            mask_bool = (drug_mask == 0) # True where pad
-            raw_scores = raw_scores.masked_fill(mask_bool.unsqueeze(-1), -1e9)
-        
-        # 5. Softmax -> Weights [B, L, 1]
-        attn_weights = F.softmax(raw_scores, dim=1)
-        
-        # 6. Weighted Sum (Pooling): [B, L, D] * [B, L, 1] -> sum -> [B, D]
-        drug_pooled = torch.sum(drug_seq * attn_weights, dim=1)
-        
-        # 7. Final Concatenation: [Drug_pooled, Cell]
-        final_rep = torch.cat([drug_pooled, cell_vec], dim=1) # [B, D_drug + D_cell]
-        
-        # 8. Project to unified dimension
-        output = self.post_proj(final_rep) # [B, out_dim]
-        
-        return output
+            key_padding_mask = drug_mask == 0
+            all_pad = key_padding_mask.all(dim=1)
+            if all_pad.any():
+                key_padding_mask = key_padding_mask.clone()
+                key_padding_mask[all_pad, 0] = False
 
+        attn_output, _ = self.cross_attn(
+            query=query,
+            key=drug_seq,
+            value=drug_seq,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )
+        attn_output = attn_output.squeeze(1)
+        query_flat = query.squeeze(1)
 
-# =========================
-#  Combined Model
-# =========================
+        if all_pad is not None and all_pad.any():
+            attn_output = torch.where(all_pad.unsqueeze(1), query_flat, attn_output)
+
+        attn_output = self.attn_norm(attn_output + query_flat)
+        attn_output = self.ffn_norm(attn_output + self.ffn(attn_output))
+        return self.post_proj(torch.cat([attn_output, cell_vec], dim=1))
+
 
 class CombinedModel(nn.Module):
     def __init__(
         self,
-        num_domains,
-        espf_vocab_size=3000,
-        espf_max_len=50,
-        drug_hidden_size=256,
-        cell_in_dim=200,
-        cell_hidden_dim=128,
-        lambda_adv=0.1,
-        llm_dim=1536
+        *,
+        espf_vocab_size: int,
+        espf_max_len: int,
+        cell_in_dim: int,
+        llm_dim: int,
+        drug_hidden_size: int = 256,
+        cell_hidden_dim: int = 128,
+        lambda_adv: float = 0.1,
     ):
         super().__init__()
-        self.num_cells = num_domains
         self.llm_dim = int(llm_dim)
-        self.drug_hidden_size = int(drug_hidden_size)
 
-        # 1. Drug Encoder (Transformer, returns sequence)
-        self.drug_transformer_model = DrugEncoder(
+        self.drug_transformer = DrugEncoder(
             vocab_size=espf_vocab_size,
             hidden_size=drug_hidden_size,
             max_seq_length=espf_max_len,
             num_layers=2,
             num_heads=8,
             dropout_rate=0.1,
-            pad_token_id=0
+            pad_token_id=0,
         )
-
-        # 2. Cell Adapter (MLP + Residual)
         self.cell_adapter = CellResidualAdapter(
             input_dim=cell_in_dim,
             hidden_dim=cell_hidden_dim,
-            dropout=0.1
+            dropout=0.1,
         )
-
-        # 3. Fusion Strategy: Gated Pooling
-        # Drug(256) + Cell(128) -> 256
-        self.fusion = GatedPoolingFusion(
+        self.fusion = CrossAttentionFusion(
             drug_dim=drug_hidden_size,
             cell_dim=cell_hidden_dim,
-            out_dim=drug_hidden_size 
+            out_dim=drug_hidden_size,
+            num_heads=8,
+            dropout=0.1,
         )
-
-        # 4. LLM Adapter
         self.llm_adapter = nn.Sequential(
             nn.LayerNorm(self.llm_dim),
             nn.Linear(self.llm_dim, drug_hidden_size),
             nn.GELU(),
             nn.Dropout(0.1),
         )
-
-        # 5. Merge Structure + LLM
         self.drug_merge = nn.Sequential(
             nn.Linear(drug_hidden_size * 2, drug_hidden_size),
             nn.ReLU(),
             nn.Dropout(0.1),
         )
-
-        # 6. Regression Head
-        # DrugA(256) + DrugB(256) = 512
         self.mlp = MLP(input_size=drug_hidden_size * 2, hidden_size=256)
-
-        # 7. DANN Module
         self.dann = DANNModule(feature_dim=drug_hidden_size * 2, num_domains=2, lambda_adv=lambda_adv)
 
     def forward(
         self,
-        ESPF_A, ESPF_B, mask_A, mask_B,
-        omics_latent_vectors,
-        llm_A=None, llm_B=None,
-        labels=None,
-        is_test=False
-    ):
-        # ---- 1. Encode Drug Sequence ----
-        tA = self.drug_transformer_model(ESPF_A, mask_A)  # [B, L, 256]
-        tB = self.drug_transformer_model(ESPF_B, mask_B)  # [B, L, 256]
+        *,
+        espf_a: torch.Tensor,
+        espf_b: torch.Tensor,
+        mask_a: torch.Tensor,
+        mask_b: torch.Tensor,
+        omics_latent: torch.Tensor,
+        llm_a: torch.Tensor,
+        llm_b: torch.Tensor,
+        is_test: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        cell_code = self.cell_adapter(omics_latent)
 
-        # ---- 2. Encode Cell Vector ----
-        cell_code = self.cell_adapter(omics_latent_vectors)  # [B, 128]
+        espf_ab = torch.cat([espf_a, espf_b], dim=0)
+        mask_ab = torch.cat([mask_a, mask_b], dim=0)
+        encoded_ab = self.drug_transformer(espf_ab, mask_ab)
 
-        # ---- 3. Gated Pooling Fusion ----
-        # Cell context guides the pooling of Drug Sequence
-        final_Ainput = self.fusion(tA, mask_A, cell_code)  # [B, 256]
-        final_Binput = self.fusion(tB, mask_B, cell_code)  # [B, 256]
+        cell_twice = torch.cat([cell_code, cell_code], dim=0)
+        fused_ab = self.fusion(encoded_ab, mask_ab, cell_twice)
+        fused_a, fused_b = fused_ab.chunk(2, dim=0)
 
-        # =============== ADV FEATURE (Structure + Omics Only) ===============
-        pair_feature_adv = torch.cat([final_Ainput, final_Binput], dim=1)  # [B, 512]
+        pair_feature_adv = torch.cat([fused_a, fused_b], dim=1)
 
-        # =============== FULL FEATURE (With LLM) ===============
-        B_size = final_Ainput.size(0)
-        device = final_Ainput.device
+        llm_ab = torch.cat([llm_a, llm_b], dim=0)
+        llm_projected = self.llm_adapter(llm_ab)
+        struct_ab = torch.cat([fused_a, fused_b], dim=0)
+        merged_ab = self.drug_merge(torch.cat([struct_ab, llm_projected], dim=1))
+        drug_a_final, drug_b_final = merged_ab.chunk(2, dim=0)
 
-        if llm_A is None:
-            llm_A = torch.zeros(B_size, self.llm_dim, device=device, dtype=final_Ainput.dtype)
-        if llm_B is None:
-            llm_B = torch.zeros(B_size, self.llm_dim, device=device, dtype=final_Binput.dtype)
-
-        # LLM Projection
-        llmA_256 = self.llm_adapter(llm_A) # [B, 256]
-        llmB_256 = self.llm_adapter(llm_B) # [B, 256]
-
-        # Merge Structure + LLM
-        drugA_final = self.drug_merge(torch.cat([final_Ainput, llmA_256], dim=1)) # [B, 256]
-        drugB_final = self.drug_merge(torch.cat([final_Binput, llmB_256], dim=1)) # [B, 256]
-
-        # Concat for MLP
-        pair_feature_full = torch.cat([drugA_final, drugB_final], dim=1) # [B, 512]
-
-        output = self.mlp(pair_feature_full) # [B, 1]
+        pair_feature_full = torch.cat([drug_a_final, drug_b_final], dim=1)
+        output = self.mlp(pair_feature_full)
 
         if is_test:
-            return output, None, None
+            return output, None
+        return output, pair_feature_adv
 
-        return output, pair_feature_adv, None
+
+def _compute_regression_metrics(y_true: list[float], y_pred: list[float]) -> tuple[float, float, float, float]:
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = sqrt(mse)
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
+    return mse, rmse, mae, r2
 
 
-# =========================
-#  Train / Val / Test Logic
-# =========================
+def _forward_batch(model: CombinedModel, batch_data: dict, device: torch.device, is_test: bool) -> tuple[torch.Tensor, torch.Tensor | None]:
+    return model(
+        espf_a=batch_data["ESPF_A"].to(device),
+        espf_b=batch_data["ESPF_B"].to(device),
+        mask_a=batch_data["mask_A"].to(device),
+        mask_b=batch_data["mask_B"].to(device),
+        omics_latent=batch_data["omics_latent"].to(device),
+        llm_a=batch_data["llm_A"].to(device),
+        llm_b=batch_data["llm_B"].to(device),
+        is_test=is_test,
+    )
 
-def train_supervised(model, train_loader, optimizer, criterion, device):
+
+def train_supervised(
+    model: CombinedModel,
+    train_loader,
+    optimizer,
+    criterion,
+    device: torch.device,
+) -> tuple[float, float, float, float, float]:
     model.train()
     running_loss = 0.0
-    y_true, y_pred = [], []
+    y_true: list[float] = []
+    y_pred: list[float] = []
 
     progress_bar = tqdm(train_loader, desc="Training (supervised)", leave=False)
-
-    for batch_data in progress_bar:
-        labels = batch_data['label'].to(device)
-        omics_latent_vectors = batch_data['omics_latent'].to(device)
-        ESPF_A = batch_data['ESPF_A'].to(device)
-        ESPF_B = batch_data['ESPF_B'].to(device)
-        mask_A = batch_data['mask_A'].to(device)
-        mask_B = batch_data['mask_B'].to(device)
-        llm_A = batch_data['llm_A'].to(device)
-        llm_B = batch_data['llm_B'].to(device)
-
+    for batch in progress_bar:
+        labels = batch["label"].to(device)
         optimizer.zero_grad()
-
-        outputs, _, _ = model(
-            ESPF_A, ESPF_B, mask_A, mask_B,
-            omics_latent_vectors,
-            llm_A=llm_A, llm_B=llm_B,
-            labels=labels,
-            is_test=False
-        )
-
-        outputs_squeezed = outputs.squeeze(-1)
-        loss = criterion(outputs_squeezed, labels)
-
+        outputs, _ = _forward_batch(model, batch, device, is_test=False)
+        outputs = outputs.squeeze(-1)
+        loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item()
         y_true.extend(labels.detach().cpu().numpy())
-        y_pred.extend(outputs_squeezed.detach().cpu().numpy())
+        y_pred.extend(outputs.detach().cpu().numpy())
         progress_bar.set_postfix(loss=loss.item())
 
-    avg_loss = running_loss / len(train_loader)
-    mse = mean_squared_error(y_true, y_pred)
-    rmse = sqrt(mse)
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
-    return avg_loss, mse, rmse, mae, r2
+    mse, rmse, mae, r2 = _compute_regression_metrics(y_true, y_pred)
+    return running_loss / len(train_loader), mse, rmse, mae, r2
+
 
 def train_with_dann(
-    model, dann_module,
-    source_loader, target_loader,
-    optimizer, criterion, device,
-    adv_weight=1.0
-):
-    """
-    DANN
-    """
+    model: CombinedModel,
+    source_loader,
+    target_loader,
+    optimizer,
+    criterion,
+    device: torch.device,
+    adv_weight: float = 1.0,
+) -> tuple[float, float, float, float, float, float, float]:
     model.train()
-    dann_module.train()
+    model.dann.train()
 
     running_loss = 0.0
-    y_true, y_pred = [], []
+    align_loss_sum = 0.0
     domain_acc_sum = 0.0
+    y_true: list[float] = []
+    y_pred: list[float] = []
 
-    progress_bar = tqdm(source_loader, desc="Training (DANN)", leave=False)
     target_iter = iter(target_loader)
+    progress_bar = tqdm(source_loader, desc="Training (DANN)", leave=False)
 
     for batch_src in progress_bar:
         try:
@@ -418,188 +360,69 @@ def train_with_dann(
             target_iter = iter(target_loader)
             batch_tgt = next(target_iter)
 
-        # ===== source =====
-        labels_src = batch_src['label'].to(device)
-        omics_latent_src = batch_src['omics_latent'].to(device)
-        ESPF_A_src = batch_src['ESPF_A'].to(device)
-        ESPF_B_src = batch_src['ESPF_B'].to(device)
-        mask_A_src = batch_src['mask_A'].to(device)
-        mask_B_src = batch_src['mask_B'].to(device)
-        domain_type_src = batch_src['domain_type'].to(device).long()  # 0
-
-        # NEW: LLM embeddings (source)
-        llm_A_src = batch_src['llm_A'].to(device)
-        llm_B_src = batch_src['llm_B'].to(device)
-
-        # ===== target =====
-        omics_latent_tgt = batch_tgt['omics_latent'].to(device)
-        ESPF_A_tgt = batch_tgt['ESPF_A'].to(device)
-        ESPF_B_tgt = batch_tgt['ESPF_B'].to(device)
-        mask_A_tgt = batch_tgt['mask_A'].to(device)
-        mask_B_tgt = batch_tgt['mask_B'].to(device)
-        domain_type_tgt = batch_tgt['domain_type'].to(device).long()  # 1
-
-        # NEW: LLM embeddings (target)
-        llm_A_tgt = batch_tgt['llm_A'].to(device)
-        llm_B_tgt = batch_tgt['llm_B'].to(device)
+        labels_src = batch_src["label"].to(device)
+        domain_src = batch_src["domain_type"].to(device).long()
+        domain_tgt = batch_tgt["domain_type"].to(device).long()
 
         optimizer.zero_grad()
 
-        # adv_feature（adv_feature no LLM）
-        outputs_src, feat_adv_src, _ = model(
-            ESPF_A_src, ESPF_B_src, mask_A_src, mask_B_src,
-            omics_latent_src,
-            llm_A=llm_A_src, llm_B=llm_B_src,
-            labels=labels_src,
-            is_test=False
-        )
-        outputs_src_squeezed = outputs_src.squeeze(-1)
-        task_loss = criterion(outputs_src_squeezed, labels_src)
+        outputs_src, feat_src = _forward_batch(model, batch_src, device, is_test=False)
+        outputs_src = outputs_src.squeeze(-1)
+        task_loss = criterion(outputs_src, labels_src)
 
-        _, feat_adv_tgt, _ = model(
-            ESPF_A_tgt, ESPF_B_tgt, mask_A_tgt, mask_B_tgt,
-            omics_latent_tgt,
-            llm_A=llm_A_tgt, llm_B=llm_B_tgt,
-            labels=None,
-            is_test=False
-        )
+        _, feat_tgt = _forward_batch(model, batch_tgt, device, is_test=False)
 
-        # domain prediction
-        f_all = torch.cat([feat_adv_src, feat_adv_tgt], dim=0)  # (Bsrc+Btgt, 512)
-        d_all = torch.cat([domain_type_src, domain_type_tgt], dim=0)  # (Bsrc+Btgt,)
-
-        adv_loss, domain_pred = dann_module(f_all, d_all)
+        all_features = torch.cat([feat_src, feat_tgt], dim=0)
+        all_domains = torch.cat([domain_src, domain_tgt], dim=0)
+        adv_loss, domain_logits = model.dann(all_features, all_domains)
 
         loss = task_loss + adv_weight * adv_loss
         loss.backward()
         optimizer.step()
 
         running_loss += task_loss.item()
+        align_loss_sum += adv_loss.item()
         y_true.extend(labels_src.detach().cpu().numpy())
-        y_pred.extend(outputs_src_squeezed.detach().cpu().numpy())
-
+        y_pred.extend(outputs_src.detach().cpu().numpy())
         with torch.no_grad():
-            batch_domain_acc = (domain_pred.argmax(dim=1) == d_all.view(-1)).float().mean().item()
+            batch_domain_acc = (domain_logits.argmax(dim=1) == all_domains).float().mean().item()
         domain_acc_sum += batch_domain_acc
-
         progress_bar.set_postfix(loss=loss.item(), dom_acc=batch_domain_acc)
 
-    avg_loss = running_loss / len(source_loader)
-    mse = mean_squared_error(y_true, y_pred)
-    rmse = sqrt(mse)
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
-    domain_acc_avg = domain_acc_sum / len(source_loader)
-    return avg_loss, mse, rmse, mae, r2, domain_acc_avg
+    mse, rmse, mae, r2 = _compute_regression_metrics(y_true, y_pred)
+    return (
+        running_loss / len(source_loader),
+        mse,
+        rmse,
+        mae,
+        r2,
+        domain_acc_sum / len(source_loader),
+        align_loss_sum / len(source_loader),
+    )
 
 
-def validate(model, val_loader, criterion, device):
+@torch.no_grad()
+def validate(
+    model: CombinedModel,
+    val_loader,
+    criterion,
+    device: torch.device,
+) -> tuple[float, float, float, float, float]:
     model.eval()
     running_loss = 0.0
-    y_true, y_pred = [], []
+    y_true: list[float] = []
+    y_pred: list[float] = []
 
     progress_bar = tqdm(val_loader, desc="Validation", leave=False)
+    for batch in progress_bar:
+        labels = batch["label"].to(device)
+        outputs, _ = _forward_batch(model, batch, device, is_test=True)
+        outputs = outputs.squeeze(-1)
+        loss = criterion(outputs, labels)
 
-    with torch.no_grad():
-        for batch_data in progress_bar:
-            labels = batch_data['label'].to(device)
-            omics_latent_vectors = batch_data['omics_latent'].to(device)
-            ESPF_A = batch_data['ESPF_A'].to(device)
-            ESPF_B = batch_data['ESPF_B'].to(device)
-            mask_A = batch_data['mask_A'].to(device)
-            mask_B = batch_data['mask_B'].to(device)
+        running_loss += loss.item()
+        y_true.extend(labels.detach().cpu().numpy())
+        y_pred.extend(outputs.detach().cpu().numpy())
 
-            # NEW: LLM embeddings
-            llm_A = batch_data['llm_A'].to(device)
-            llm_B = batch_data['llm_B'].to(device)
-
-            outputs, _, _ = model(
-                ESPF_A, ESPF_B, mask_A, mask_B,
-                omics_latent_vectors,
-                llm_A=llm_A, llm_B=llm_B,
-                labels=labels,
-                is_test=False
-            )
-
-            outputs_squeezed = outputs.squeeze(-1)
-            loss = criterion(outputs_squeezed, labels)
-
-            running_loss += loss.item()
-            y_true.extend(labels.detach().cpu().numpy())
-            y_pred.extend(outputs_squeezed.detach().cpu().numpy())
-
-            progress_bar.set_postfix(loss=loss.item())
-
-    avg_loss = running_loss / len(val_loader)
-    mse = mean_squared_error(y_true, y_pred)
-    rmse = sqrt(mse)
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
-    return avg_loss, mse, rmse, mae, r2
-
-
-def test(model, test_loader, criterion, device, save_path="predictions.csv", domain_name=""):
-    model.eval()
-    test_loss = 0.0
-    y_true, y_pred = [], []
-    drugA_smiles, drugB_smiles, S_id, domain_tags = [], [], [], []
-
-    progress_bar = tqdm(test_loader, desc=f"Testing ({domain_name})", leave=False)
-
-    with torch.no_grad():
-        for batch_data in progress_bar:
-            drugA_smiles_batch = batch_data['smilesA']
-            drugB_smiles_batch = batch_data['smilesB']
-            sample_id_batch = batch_data['sample_id']
-
-            labels = batch_data['label'].to(device)
-            omics_latent_vectors = batch_data['omics_latent'].to(device)
-            ESPF_A = batch_data['ESPF_A'].to(device)
-            ESPF_B = batch_data['ESPF_B'].to(device)
-            mask_A = batch_data['mask_A'].to(device)
-            mask_B = batch_data['mask_B'].to(device)
-
-            # NEW: LLM embeddings
-            llm_A = batch_data['llm_A'].to(device)
-            llm_B = batch_data['llm_B'].to(device)
-
-            outputs, _, _ = model(
-                ESPF_A, ESPF_B, mask_A, mask_B,
-                omics_latent_vectors,
-                llm_A=llm_A, llm_B=llm_B,
-                labels=None,
-                is_test=True
-            )
-
-            outputs_squeezed = outputs.squeeze(-1)
-            loss = criterion(outputs_squeezed, labels)
-            test_loss += loss.item() * len(labels)
-
-            y_true.extend(labels.detach().cpu().numpy())
-            y_pred.extend(outputs_squeezed.detach().cpu().numpy())
-            drugA_smiles.extend(drugA_smiles_batch)
-            drugB_smiles.extend(drugB_smiles_batch)
-            S_id.extend(sample_id_batch)
-            domain_tags.extend([domain_name] * len(labels))
-
-            progress_bar.set_postfix(loss=loss.item())
-
-    results_df = pd.DataFrame({
-        "Domain": domain_tags,
-        "DrugA_SMILES": drugA_smiles,
-        "DrugB_SMILES": drugB_smiles,
-        "sample_id": S_id,
-        "True_Label": y_true,
-        "Predicted_Label": y_pred
-    })
-    results_df.to_csv(save_path, index=False)
-    print(f"[{domain_name}] prediction saved to {save_path}")
-
-    mse = mean_squared_error(y_true, y_pred)
-    rmse = sqrt(mse)
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
-    avg_loss = test_loss / len(test_loader.dataset)
-
-    print(f"[{domain_name}] Loss: {avg_loss:.4f}, MSE: {mse:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}, R2: {r2:.4f}")
-    return avg_loss, mse, rmse, mae, r2
+    mse, rmse, mae, r2 = _compute_regression_metrics(y_true, y_pred)
+    return running_loss / len(val_loader), mse, rmse, mae, r2
