@@ -1,7 +1,8 @@
 # DanSyn
 
-DanSyn predicts drug synergy with `ESPF`, cell latent features, cross attention,
-optional `DANN`, and `gpt_3_5_turbo` drug features.
+DanSyn is a drug synergy prediction framework designed to combine drug
+structure, cell-state context, and semantic drug knowledge for stronger
+cross-domain generalization.
 
 The main entry is `main.py`.
 
